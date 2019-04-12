@@ -84,8 +84,8 @@ class DecoderRNN(nn.Module):
 
         output, self.hidden5 = self.lstm_5(output + output_3, self.hidden5)  # skip_connection 3
         
-        output = self.out(output).view(self.batch_size, -1,self.output_size)
-        return output
+        #output = self.out(output).view(self.batch_size, -1,self.output_size)
+        #return output
         
         if self.verbose:
             output = self.dropout5(output)
@@ -233,25 +233,128 @@ def input_slicing(train_X, train_Y, path):
     slicing_train_Y = []
     slicing_train = []
     target_index = []
-    target_composers = ["bee-snt", "moz-snt", "cho-bal", "cho-pld", "bac-wtc"]
-    for composer in target_composers:
-        for i in range(len(train_X)):
-            if i in VAL_INDEX:
-                continue
-            if(composer in path[i]):
-                start_loc, end_loc = 0, 400
-                while end_loc <= len(train_X[i]):
-                    current_input = train_X[i][start_loc:end_loc]
-                    current_label = train_Y[i][start_loc:end_loc]
-                    start_loc += 50
-                    end_loc += 50
-                    slicing_train.append((current_input, current_label))
+    #target_composers = ["bee-snt", "moz-snt", "cho-bal", "cho-pld", "bac-wtc"]
+    #for composer in target_composers:
+    for i in range(10, len(train_X)):
+        #if i in VAL_INDEX:
+            #continue
+        #if(composer in path[i]):
+        start_loc, end_loc = 0, 400
+        while end_loc <= len(train_X[i]):
+            current_input = train_X[i][start_loc:end_loc]
+            current_label = train_Y[i][start_loc:end_loc]
+            start_loc += 50
+            end_loc += 50
+            slicing_train.append((current_input, current_label))
     shuffle(slicing_train)
     for item in slicing_train:
         X, Y = item
         slicing_train_X.append(X)
         slicing_train_Y.append(Y)
     return np.array(slicing_train_X), np.array(slicing_train_Y)
+
+def frame_to_notes(note_sequence, interval=0.05, tempo_curve = None, standard_tempo = 60):
+    N,_,_=note_sequence.shape
+    frame_to_time = []
+    current_time = 0
+    for i in range(0,N):
+        if float(tempo_curve[i])!=0:
+            current_time += round(float(tempo_curve[i]/standard_tempo) * interval, 3)
+        frame_to_time.append(current_time)
+    #piano_c_chord=pretty_midi.PrettyMIDI()
+    #piano_program=pretty_midi.instrument_name_to_program('Acoustic Grand Piano')
+    #piano=pretty_midi.Instrument(program=piano_program)
+    notes = []
+    current_interval = 0.05
+    for p in range(128):
+        index=0
+        in_a_note=False
+        note_start=-1
+        note_end=-1
+        note_velocity=-1
+        current_time = 0
+        while(index<N):
+            if(in_a_note): #the last slice says hold
+                #current_interval = float(60/tempo_curve[index] * interval)
+                #current_interval = interval
+                #security check
+                assert note_velocity>=0 and p>=0 and note_start>=0 and note_end>=0
+                hold=note_sequence[index,p,1]
+                if(hold): #the current slice says hold
+                    note_end+=1
+                    index+=1
+                else: #the current slice says not hold
+                    #add the note
+                    #print(p,note_start*interval,note_end*interval,int(note_velocity))
+                    if(note_end<note_start+1):
+                        note_end=note_start+1
+                    velocity=int(note_velocity)
+                    pitch=int(p)
+                    start=frame_to_time[note_start]
+                    end=frame_to_time[note_end]
+                    #midi_note=pretty_midi.Note(velocity=100, pitch=pitch, start=start, end=end)
+                    #piano.notes.append(midi_note)
+                    note = [pitch,start,end,velocity]
+                    notes.append(note)
+                    #check for new note
+                    exist=note_sequence[index,p,0]
+                    if(exist):
+                        #new note of pitch p begins immediately(which should be rare)
+                        note_start=index
+                        note_end=index
+                        note_velocity=note_sequence[index,p,2]
+                        in_a_note=True
+                        index+=1
+                    else:
+                        #no note
+                        note_start=-1
+                        note_end=-1
+                        note_velocity=-1
+                        in_a_note=False
+                        index+=1
+            else: #the last slice says not hold
+                assert note_velocity<0 and note_start<0 and note_end<0
+                exist=note_sequence[index,p,0]
+                if(exist):
+                    note_start=index
+                    note_end=index
+                    note_velocity=note_sequence[index,p,2]
+                    in_a_note=True
+                    index+=1
+                else:
+                    index+=1
+            #current_time += (60/tempo_curve[index] * interval)
+    #piano_c_chord.instruments.append(piano)
+    #fpath=out_path+"test"+'.mid'
+    #piano_c_chord.write(fpath)
+    return np.array(notes)
+
+def notes_to_frame(notes):
+    N = notes.shape[0]
+    final_time = np.max(notes[:,2])
+    total_frame = int(final_time * 20 + 1)
+    frame_data = np.zeros((total_frame, 128, 3))
+    for p in range(128):
+        for note in notes:
+            if note[0] == p:
+                start_frame, end_frame = int(note[1] * 20), int(note[2] * 20)
+                frame_data[start_frame:end_frame+1, p, 0] = 1
+                frame_data[start_frame+1:end_frame+1, p, 1] = 1
+                frame_data[start_frame:end_frame+1, p, 2] = note[3]
+    return frame_data
+
+def create_score_input(train_X, train_Y, tempo = 120):
+    score_train_X = []
+    score_train_Y = []
+    tempo_cand = [90, 120, 150]
+    for i in range(len(train_X)):
+        notes = frame_to_notes(torch.from_numpy(np.array(train_X[i])), 0.05, train_Y[i], tempo_cand[i%3])
+        X = notes_to_frame(notes)
+        N,_,_ = X.shape
+        Y = np.ones((N)) * tempo
+        score_train_X.append(X)
+        score_train_Y.append(Y)
+    return score_train_X, score_train_Y
 
 def penalty_loss(criterion, Y, target, penalty = 10):
     loss = 0
@@ -286,6 +389,7 @@ def trainEpochs(decoder, n_epochs, print_every=1000, plot_every=100, learning_ra
     plot_losses = []
     print_loss_total = 0
     plot_loss_total = 0
+    
 
     decoder_optimizer = optim.SGD(decoder.parameters(), lr=learning_rate)
 
@@ -297,6 +401,8 @@ def trainEpochs(decoder, n_epochs, print_every=1000, plot_every=100, learning_ra
     for epoch in range(1, n_epochs + 1):
         start, end = 0, batch_size
         
+        if epoch > 5:
+            decoder_optimizer = optim.Adagrad(decoder.parameters(), lr=learning_rate)
         #verbose = (iter % print_every == 0)
         while end <= total_batch:
             iter += 1
@@ -321,7 +427,7 @@ def trainEpochs(decoder, n_epochs, print_every=1000, plot_every=100, learning_ra
                 f = open('/home/yixing/Fischer/DeepPerformance/Bi-LSTM-CNN_batch_progress.pkl', "wb")
                 pickle.dump(training_progress, f)
                 f.close()
-                
+                torch.save(decoder.state_dict(), '/home/yixing/Fischer/DeepPerformance/Bi-LSTM-CNN_batch_7L1.pt')
                 
             start += batch_size
             end += batch_size
@@ -360,7 +466,9 @@ if __name__ == "__main__":
         train_Y = dic["y"]
         path = dic["path"]
         smooth = compute_beat(train_Y, smooth = smooth, tempo_curve = tempo_curve)
-        train_X, train_Y = input_slicing(train_X, smooth, path)
+        score_train_X, score_train_Y = create_score_input(train_X, smooth, tempo = 120)
+        print("length of new score data: ", len(score_train_X))
+        train_X, train_Y = input_slicing(train_X + score_train_X, smooth + score_train_Y, path)
         print(train_X.shape)
         print(train_Y.shape)
         maximum_target = len(train_Y)
@@ -377,6 +485,7 @@ if __name__ == "__main__":
     output_size = 1
 
     decoder = DecoderRNN(input_size, augmented_size, hidden_size, output_size).to(device)
+    #decoder.load_state_dict(torch.load("Bi-LSTM-CNN_batch.pt"))
     print("total_batch", len(train_Y))
-    trainEpochs(decoder, int(args.epoch), print_every=5, learning_rate=float(args.learning_rate), total_batch=int(total_batch), batch_size = int(args.batch_size), gamma=0.5)
-    torch.save(decoder.state_dict(), '/home/yixing/Fischer/DeepPerformance/Bi-LSTM-CNN_batch1.pt')
+    trainEpochs(decoder, int(args.epoch), print_every=20, learning_rate=float(args.learning_rate), total_batch=int(total_batch), batch_size = int(args.batch_size), gamma=0.5)
+    torch.save(decoder.state_dict(), '/home/yixing/Fischer/DeepPerformance/Bi-LSTM-CNN_batch_7L1.pt')
